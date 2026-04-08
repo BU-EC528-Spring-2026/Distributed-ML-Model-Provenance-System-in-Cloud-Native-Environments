@@ -1,58 +1,65 @@
 #!/usr/bin/env bash
-# build_and_push.sh – Build all three service images.
+# build_and_push.sh – Build all service images for Docker or Kubernetes.
 #
 # Usage:
-#   ./scripts/build_and_push.sh                         # build only
-#   ./scripts/build_and_push.sh --kind                  # load into Kind cluster
-#   ./scripts/build_and_push.sh --kind atlas-pipeline   # named Kind cluster
-#   ./scripts/build_and_push.sh --minikube              # load into minikube
-#   ./scripts/build_and_push.sh --registry ecr          # push to ECR
+#   ./scripts/build_and_push.sh                             # build only
+#   ./scripts/build_and_push.sh --registry ghcr.io/acme     # tag/push to a registry prefix
+#   ./scripts/build_and_push.sh --docker-desktop            # build for Docker Desktop Kubernetes
+#   ./scripts/build_and_push.sh --minikube                  # load into minikube image cache
+#   ./scripts/build_and_push.sh --kind                      # load into kind image cache
+#   ./scripts/build_and_push.sh --kind --kind-cluster demo
 
 set -euo pipefail
 
 REGISTRY=""
+DOCKER_DESKTOP=false
 MINIKUBE=false
 KIND=false
-KIND_CLUSTER="atlas-pipeline"
+KIND_CLUSTER="kind"
 TAG="latest"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --registry) REGISTRY="$2"; shift ;;
     --tag)      TAG="$2";      shift ;;
+    --docker-desktop) DOCKER_DESKTOP=true ;;
     --minikube) MINIKUBE=true ;;
-    --kind)
-      KIND=true
-      if [[ "${2:-}" != "" && "${2:-}" != --* ]]; then
-        KIND_CLUSTER="$2"; shift
-      fi
-      ;;
+    --kind)     KIND=true ;;
+    --kind-cluster) KIND_CLUSTER="$2"; shift ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
   shift
 done
 
-SERVICES=("data-ingestion" "preprocessing" "fine-tuning")
+SERVICES=("data-ingestion" "preprocessing" "fine-tuning" "atlas-sidecar")
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Building ML provenance service images (tag=$TAG)…"
+if $DOCKER_DESKTOP; then
+  echo "Docker Desktop mode: images will be available to the docker-desktop Kubernetes cluster via the local Docker image store."
+fi
 
-for svc in "${SERVICES[@]}"; do
+for i in "${!SERVICES[@]}"; do
+  svc="${SERVICES[$i]}"
   image_name="ml-provenance/${svc}:${TAG}"
-  full_name="${REGISTRY:+${REGISTRY}/}${image_name}"
+  if [[ -n "$REGISTRY" ]]; then
+    full_name="${REGISTRY}/${image_name}"
+  else
+    full_name="$image_name"
+  fi
 
   echo ""
   echo "── Building ${svc} ──────────────────────────────────────"
   docker build -t "$full_name" "${ROOT}/services/${svc}"
 
-  if $KIND; then
-    echo "Loading ${full_name} into Kind cluster '${KIND_CLUSTER}'…"
-    kind load docker-image "$full_name" --name "${KIND_CLUSTER}"
-  fi
-
   if $MINIKUBE; then
     echo "Loading ${full_name} into minikube…"
     minikube image load "$full_name"
+  fi
+
+  if $KIND; then
+    echo "Loading ${full_name} into kind cluster ${KIND_CLUSTER}…"
+    kind load docker-image "$full_name" --name "$KIND_CLUSTER"
   fi
 
   if [[ -n "$REGISTRY" ]]; then
@@ -63,7 +70,15 @@ done
 
 echo ""
 echo "All images built successfully."
-echo ""
-echo "Next — deploy to Kubernetes:"
-echo "  kubectl apply -f ${ROOT}/k8s/services.yaml"
-echo "  kubectl rollout status deployment -n ml-pipeline"
+if $DOCKER_DESKTOP; then
+  echo "Deploy with:"
+  echo "  pwsh scripts/deploy_k8s.ps1 -DockerDesktop"
+fi
+if $MINIKUBE; then
+  echo "Images loaded into minikube. Deploy with:"
+  echo "  kubectl apply -k k8s/"
+fi
+if $KIND; then
+  echo "Images loaded into kind cluster ${KIND_CLUSTER}. Deploy with:"
+  echo "  kubectl apply -k k8s/"
+fi
