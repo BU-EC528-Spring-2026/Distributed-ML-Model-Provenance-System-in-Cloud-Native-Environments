@@ -208,6 +208,88 @@ def _persist_registry():
         json.dump(data, handle, indent=2)
 
 
+def _generate_slsa_attestation(
+    *,
+    tracking_id: str,
+    artifact_uri: str,
+    ingredient_name: str,
+    pipeline_id: str,
+    stage: str,
+    stage_order: int,
+    artifact_type: str,
+    metadata: dict,
+    input_s3_uris: Optional[list[str]] = None,
+    c2pa_manifest_id: Optional[str] = None,
+) -> dict:
+    """Build a SLSA Provenance v0.2 predicate wrapped in an in-toto Statement."""
+    now = datetime.utcnow().isoformat() + "Z"
+    sha256 = metadata.get("sha256", "")
+
+    materials = [{"uri": uri, "digest": {}} for uri in (input_s3_uris or [])]
+    if _is_resolvable_manifest_id(c2pa_manifest_id):
+        materials.append({"uri": f"urn:c2pa:{c2pa_manifest_id}", "digest": {}})
+
+    build_started = (
+        metadata.get("ingested_at")
+        or metadata.get("processed_at")
+        or metadata.get("trained_at")
+        or now
+    )
+
+    return {
+        "_type": "https://in-toto.io/Statement/v0.1",
+        "subject": [
+            {
+                "name": ingredient_name,
+                "uri": artifact_uri,
+                "digest": {"sha256": sha256} if sha256 else {},
+            }
+        ],
+        "predicateType": "https://slsa.dev/provenance/v0.2",
+        "predicate": {
+            "builder": {
+                "id": "https://ml-pipeline/atlas-sidecar",
+            },
+            "buildType": "https://ml-pipeline/pipeline-stage@v1",
+            "invocation": {
+                "parameters": {
+                    "pipeline_id": pipeline_id,
+                    "stage": stage,
+                    "stage_order": stage_order,
+                    "artifact_type": artifact_type,
+                    "ingredient_name": ingredient_name,
+                },
+                "environment": {
+                    "pod_name": POD_NAME,
+                    "pod_namespace": POD_NAMESPACE,
+                    "node_name": NODE_NAME,
+                    "deployment_mode": DEPLOYMENT_MODE,
+                },
+            },
+            "materials": materials,
+            "metadata": {
+                "buildStartedOn": build_started,
+                "buildFinishedOn": now,
+                "completeness": {
+                    "parameters": True,
+                    "environment": bool(POD_NAME),
+                    "materials": bool(input_s3_uris),
+                },
+                "reproducible": False,
+            },
+        },
+    }
+
+
+def _attach_slsa_to_record(tracking_id: str, slsa: dict) -> None:
+    with _lock:
+        for key, record in _registry.items():
+            if record.get("tracking_id") == tracking_id:
+                _registry[key]["slsa_attestation"] = slsa
+                break
+    _persist_registry()
+
+
 def _load_registry():
     registry_path = MANIFESTS_DIR / "manifest_registry.json"
     if not registry_path.exists():
@@ -536,6 +618,19 @@ def collect_dataset(req: DatasetCollectRequest):
             linked_manifest_ids=req.linked_manifest_ids,
         )
 
+        slsa = _generate_slsa_attestation(
+            tracking_id=record["tracking_id"],
+            artifact_uri=req.artifact_s3_uri,
+            ingredient_name=req.ingredient_name,
+            pipeline_id=pipeline_id,
+            stage=req.stage,
+            stage_order=stage_order,
+            artifact_type="dataset",
+            metadata=req.metadata,
+            c2pa_manifest_id=manifest_id,
+        )
+        _attach_slsa_to_record(record["tracking_id"], slsa)
+
         return {
             "tracking_id": record["tracking_id"],
             "manifest_id": manifest_id,
@@ -612,6 +707,20 @@ def collect_pipeline(req: PipelineCollectRequest):
             input_s3_uris=req.input_s3_uris,
             linked_manifest_ids=linked_manifest_ids,
         )
+
+        slsa = _generate_slsa_attestation(
+            tracking_id=record["tracking_id"],
+            artifact_uri=req.output_s3_uri,
+            ingredient_name=req.ingredient_name,
+            pipeline_id=pipeline_id,
+            stage=req.stage,
+            stage_order=stage_order,
+            artifact_type="pipeline",
+            metadata=req.metadata,
+            input_s3_uris=req.input_s3_uris,
+            c2pa_manifest_id=manifest_id,
+        )
+        _attach_slsa_to_record(record["tracking_id"], slsa)
 
         return {
             "tracking_id": record["tracking_id"],
@@ -695,6 +804,23 @@ def collect_model(req: ModelCollectRequest):
             req.metadata,
             linked_manifest_ids=req.linked_dataset_manifest_ids,
         )
+
+        slsa = _generate_slsa_attestation(
+            tracking_id=record["tracking_id"],
+            artifact_uri=req.artifact_s3_uri,
+            ingredient_name=req.ingredient_name,
+            pipeline_id=pipeline_id,
+            stage=req.stage,
+            stage_order=stage_order,
+            artifact_type="model",
+            metadata=req.metadata,
+            input_s3_uris=[
+                uri for uri in req.linked_dataset_manifest_ids
+                if uri.startswith("s3://")
+            ],
+            c2pa_manifest_id=manifest_id,
+        )
+        _attach_slsa_to_record(record["tracking_id"], slsa)
 
         return {
             "tracking_id": record["tracking_id"],
@@ -874,6 +1000,49 @@ def verify_manifest(manifest_id: str):
         "output": stdout.strip(),
         "errors": stderr.strip() if rc != 0 else None,
     }
+
+
+@app.get("/slsa")
+def slsa_attestations(
+    tracking_id: Optional[str] = None,
+    pipeline_id: Optional[str] = None,
+    stage: Optional[str] = None,
+):
+    """Return SLSA Provenance v0.2 attestations (in-toto Statement format).
+
+    - With ?tracking_id=...: return the single attestation for that artifact.
+    - Without: list all attestations, optionally filtered by pipeline_id / stage.
+    """
+    if tracking_id is not None:
+        with _lock:
+            records = dict(_registry)
+        for key, record in records.items():
+            if record.get("tracking_id") == tracking_id or key == tracking_id:
+                att = record.get("slsa_attestation")
+                if att is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="No SLSA attestation stored for this artifact. "
+                               "Re-collect the artifact to generate one.",
+                    )
+                return att
+        raise HTTPException(status_code=404, detail=f"tracking_id not found: {tracking_id!r}")
+
+    if pipeline_id is not None:
+        pipeline_id = _resolve_pipeline_id_or_400(pipeline_id)
+    entries = list(_filtered_registry(pipeline_id=pipeline_id, stage=stage).items())
+    attestations = [
+        {
+            "tracking_id": record.get("tracking_id", key),
+            "pipeline_id": record.get("pipeline_id"),
+            "stage": record.get("stage"),
+            "artifact_uri": _artifact_uri_for_record(key, record),
+            "attestation": record["slsa_attestation"],
+        }
+        for key, record in entries
+        if record.get("slsa_attestation") is not None
+    ]
+    return {"count": len(attestations), "attestations": attestations}
 
 
 @app.get("/registry")

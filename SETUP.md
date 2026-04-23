@@ -1,4 +1,4 @@
-# ML Provenance Pipeline – Test Recreation Guide
+# ML Provenance Pipeline – Setup & Recreation Guide
 
 BU EC528 Spring 2026 · Intel Labs Atlas CLI
 
@@ -6,181 +6,194 @@ BU EC528 Spring 2026 · Intel Labs Atlas CLI
 
 ## Prerequisites
 
-- **Docker Desktop** — `winget install Docker.DockerDesktop`, then open a new terminal
-- **Python 3.11+** — `winget install Python.Python.3.11`
+- **Docker Desktop** — [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
+  - macOS: download from the site above
+  - Windows: `winget install Docker.DockerDesktop`, then open a new terminal
+- **Python 3.11+**
+  - Windows: `winget install Python.Python.3.11`
 - **Test dependencies** — `pip install pytest requests pytest-timeout`
 
 ---
 
 ## Step 1 — Start the Stack
 
-Choose one local runtime.
+Choose one local runtime. Do not run both at the same time — they bind the same ports (8001–8004, 9000).
 
 ### Option A — Docker Compose
 
+**macOS / Linux:**
+```bash
+docker compose up --build
+```
+
+**Windows:**
 ```bat
 docker compose --progress plain up --build
 ```
 
-Keep that terminal open. Wait until all four services are healthy. The first build is the slowest because `atlas-sidecar` compiles `atlas-cli` from Rust source; later starts are much faster because Docker reuses the cached layers.
+Keep that terminal open. The first build is slow because `atlas-sidecar` compiles `atlas-cli` from Rust source; later starts reuse cached Docker layers and are much faster.
+
+---
 
 ### Option B — Kubernetes on Docker Desktop
 
+#### macOS / Linux
+
+**One-time setup:**
+
+```bash
+# 1. Enable Kubernetes: Docker Desktop → Settings → Kubernetes → Enable Kubernetes → Apply & Restart
+
+# 2. Switch kubectl context
+kubectl config use-context docker-desktop
+
+# 3. Build images into Docker Desktop's local image store (one-time, or after code changes)
+./scripts/build_and_push.sh --docker-desktop
+```
+
+**Deploy:**
+
+```bash
+kubectl apply -k k8s/
+```
+
+**Wait for all pods to be ready:**
+
+```bash
+kubectl rollout status deployment/minio          -n ml-pipeline
+kubectl rollout status deployment/data-ingestion -n ml-pipeline
+kubectl rollout status deployment/preprocessing  -n ml-pipeline
+kubectl rollout status deployment/fine-tuning    -n ml-pipeline
+kubectl rollout status deployment/atlas-sidecar  -n ml-pipeline
+```
+
+**Start port-forwards** (run in a dedicated terminal or in the background):
+
+```bash
+kubectl port-forward svc/minio          9000:9000 9001:9001 -n ml-pipeline &
+kubectl port-forward svc/data-ingestion 8001:8001           -n ml-pipeline &
+kubectl port-forward svc/preprocessing  8002:8002           -n ml-pipeline &
+kubectl port-forward svc/fine-tuning    8003:8003           -n ml-pipeline &
+kubectl port-forward svc/atlas-sidecar  8004:8004           -n ml-pipeline &
+```
+
+Stop all port-forwards:
+
+```bash
+pkill -f "kubectl port-forward"
+```
+
+#### Windows
+
 ```bat
+:: 1. Enable Kubernetes in Docker Desktop → Settings → Kubernetes → Enable Kubernetes
+
+:: 2. Build images and deploy (one-shot wrapper)
 scripts\setup_k8s_docker_desktop.bat
 ```
 
-That batched Windows wrapper builds the images and deploys the cluster stack.
-In Docker Desktop mode it also clears the previous Kubernetes service deployments and waits for their pods to disappear first, so each startup comes up on fresh pods.
-After deployment it keeps the current terminal attached to a live Kubernetes pod-status stream instead of opening another terminal automatically.
-
-Then start the port-forwards manually in the terminal where you want them to run:
-
-```powershell
-pwsh scripts\port_forward.ps1
-```
-
-If you only want the deploy step without the live watcher:
+That wrapper builds the images, deploys the Kubernetes stack, clears existing deployments first, and streams `kubectl get pods -w` in the same terminal.
 
 ```bat
+:: Deploy without the live watcher
 scripts\setup_k8s_docker_desktop.bat --no-watch
 ```
 
-### Verify
+**Start port-forwards** in a separate terminal:
 
 ```powershell
-Invoke-RestMethod http://localhost:8001/health   # data-ingestion
-Invoke-RestMethod http://localhost:8002/health   # preprocessing
-Invoke-RestMethod http://localhost:8003/health   # fine-tuning
-Invoke-RestMethod http://localhost:8004/health   # atlas-sidecar
-```
-
-Each should return `{ "status": "ok" }`.
-
-Do not leave both local backends active on the same localhost ports at the same time. Stop Compose before using the Kubernetes port-forwards, and stop the Kubernetes port-forwards before switching back to Compose.
-
-Docker Compose is the default local setup. The Kubernetes manifests are available for staged migration, but they are optional for normal development.
-
-### Optional: local Kubernetes deployment
-
-If you want to validate the cluster deployment without replacing the Docker workflow:
-
-```bat
-scripts\setup_k8s_docker_desktop.bat
-```
-
-That batched Windows wrapper builds the images, deploys the cluster stack, and then streams `kubectl get pods -w` in the same terminal.
-
-```powershell
-# Enable Docker Desktop Kubernetes once, then switch context
-kubectl config use-context docker-desktop
-
-# Build local images into Docker Desktop's image store
-pwsh scripts/build_images.ps1 -DockerDesktop
-
-# Apply the stack and patch the four local service deployments
-pwsh scripts/deploy_k8s.ps1 -DockerDesktop
-
-# or do both in one step
-pwsh scripts/deploy_k8s.ps1 -BuildImages -DockerDesktop
-
-# Reuse the existing localhost-based scripts by port-forwarding
 pwsh scripts\port_forward.ps1
 ```
 
-`pwsh scripts/deploy_k8s.ps1 -DockerDesktop` now enforces the `docker-desktop` context, deletes the existing local Kubernetes workloads first, waits for their old pods to terminate, applies the manifests with the four local service deployments already set to `imagePullPolicy: Never`, and waits for `minio-init` to complete. Because the deployments are created with the correct policy up front, the script no longer triggers an immediate second rollout on fresh pods.
-
-Use `scripts\stop_k8s_port_forward.bat` later to stop the port-forwards. Use `scripts\setup_k8s_docker_desktop.bat --no-watch` if you want the deployment without the live watcher.
-
-If you prefer minikube or kind, the existing `pwsh scripts/build_images.ps1 -Minikube` and `-Kind` paths still work.
-
-The Kubernetes path is intended as a migration target. Keep Compose as the baseline until you are ready to swap the operational default.
-
-### Stop and switch
-
-Stop Docker Compose:
-
-```powershell
-docker compose down
-```
-
-Stop Docker Compose and remove local volumes:
-
-```powershell
-docker compose down -v
-```
-
-Stop Kubernetes localhost port-forwards only:
+Stop port-forwards:
 
 ```bat
 scripts\stop_k8s_port_forward.bat
 ```
 
-Remove the Kubernetes stack from the Docker Desktop cluster:
+---
 
-```powershell
-kubectl delete -k k8s
+### Verify services are healthy
+
+**macOS / Linux:**
+```bash
+curl http://localhost:8001/health   # data-ingestion
+curl http://localhost:8002/health   # preprocessing
+curl http://localhost:8003/health   # fine-tuning
+curl http://localhost:8004/health   # atlas-sidecar
 ```
 
-Switch from Docker Compose to Kubernetes:
-
+**Windows:**
 ```powershell
-docker compose down
-scripts\setup_k8s_docker_desktop.bat
+Invoke-RestMethod http://localhost:8001/health
+Invoke-RestMethod http://localhost:8002/health
+Invoke-RestMethod http://localhost:8003/health
+Invoke-RestMethod http://localhost:8004/health
 ```
 
-Switch from Kubernetes back to Docker Compose:
-
-```powershell
-scripts\stop_k8s_port_forward.bat
-kubectl delete -k k8s
-docker compose --progress plain up --build
-```
+Each should return `{"status": "ok"}`.
 
 ---
 
 ## Step 2 — Run the Demo
 
-Open a new terminal while your chosen backend is still running:
+Open a new terminal while your chosen backend is running:
 
-```powershell
+```bash
+# Ingestion + preprocessing only (fast, ~1 minute)
+python demo.py
+
+# Custom sample count and pipeline ID
 python demo.py --samples 200 --pipeline-id demo-200
-python demo.py --samples 500 --train --pipeline-id demo-500
+
+# Full pipeline including fine-tuning (slow on CPU, ~10-30 min)
+python demo.py --stage full --samples 50 --train-epochs 1
+
+# Full pipeline with custom inference text
 python demo.py --samples 500 --train --pipeline-id demo-500 --predict-text "Loved it."
+
+# Full pipeline with longer training
 python demo.py --samples 500 --train --train-epochs 3 --pipeline-id demo-500
-python demo.py --stage ingest --samples 200 --pipeline-id stage-demo
+
+# Individual stages (useful when re-running after a partial run)
+python demo.py --stage ingest     --samples 200 --pipeline-id stage-demo
 python demo.py --stage preprocess --pipeline-id stage-demo
-python demo.py --stage train --pipeline-id stage-demo --predict-text "Loved it."
+python demo.py --stage train      --pipeline-id stage-demo
 ```
 
-What the demo does:
-- waits for all four `/health` endpoints to become healthy
-- runs ingestion, preprocessing, and optionally training
-- shows the sidecar lineage and pipeline status for the chosen `pipeline_id`
-- runs a small inference smoke test when `--train` is enabled
-- prints the deployment mode during health checks; on Kubernetes it explicitly shows `Runtime backend: kubernetes` together with the service pod and node names
+The demo:
+- waits for all four `/health` endpoints before starting
+- runs the requested stages and prints the provenance chain and status
+- on Kubernetes, prints `Runtime backend: kubernetes` with pod and node names for each service
+- pressing `Ctrl+C` during polling sends a cancellation request to the active service job
 
-Use a fresh `pipeline_id` when you want a clean provenance chain without reusing older artifacts.
-The demo is standalone. You do not need to run the tests before running `demo.py`.
-When `--train` is enabled, the demo uses `1` epoch by default so the walkthrough finishes faster. Use `--train-epochs 3` if you want the longer full training run.
-Use `--stage pipeline` for ingestion + preprocessing only, `--stage full` for the complete pipeline, or `--stage ingest|preprocess|train` to run only one stage. `--train` remains available as a legacy alias for `--stage full`.
-If you press `Ctrl+C` while the demo is waiting on ingestion, preprocessing, or training, it now sends a cancellation request to the active service job before exiting.
-Cancellation is best-effort. A job that is already finishing may still report `completed` instead of `cancelled`.
+Use a fresh `--pipeline-id` for a clean provenance chain without reusing older artifacts.
 
 ---
 
-## Step 3 — Verify Provenance Collection
+## Step 3 — Verify Provenance
 
-After a full demo run such as:
+After a pipeline run, query the sidecar directly:
 
-```powershell
-python demo.py --samples 500 --train --pipeline-id demo-500
+**macOS / Linux:**
+```bash
+PIPELINE=demo-200
+
+curl "http://localhost:8004/lineage?pipeline_id=$PIPELINE"
+curl "http://localhost:8004/pipeline/status?pipeline_id=$PIPELINE"
+curl "http://localhost:8004/registry?pipeline_id=$PIPELINE"
+
+curl "http://localhost:8001/provenance?pipeline_id=$PIPELINE"
+curl "http://localhost:8002/provenance?pipeline_id=$PIPELINE"
+curl "http://localhost:8003/provenance?pipeline_id=$PIPELINE"
+
+# SLSA attestations (Stretch Goal 7)
+curl "http://localhost:8004/slsa?pipeline_id=$PIPELINE"
 ```
 
-verify that provenance was collected and linked properly:
-
+**Windows:**
 ```powershell
-$pipeline = "demo-500"
+$pipeline = "demo-200"
 
 Invoke-RestMethod "http://localhost:8004/lineage?pipeline_id=$pipeline"
 Invoke-RestMethod "http://localhost:8004/pipeline/status?pipeline_id=$pipeline"
@@ -190,24 +203,22 @@ Invoke-RestMethod "http://localhost:8001/provenance?pipeline_id=$pipeline"
 Invoke-RestMethod "http://localhost:8002/provenance?pipeline_id=$pipeline"
 Invoke-RestMethod "http://localhost:8003/provenance?pipeline_id=$pipeline"
 
-Invoke-RestMethod "http://localhost:8003/model/info?pipeline_id=$pipeline"
+Invoke-RestMethod "http://localhost:8004/slsa?pipeline_id=$pipeline"
 ```
 
-Expected success signals:
-- `/lineage` shows `chain_complete: true`
-- `/lineage.chain` contains `data-ingestion`, `preprocessing`, and `fine-tuning`
-- every lineage entry has a sidecar `tracking_id`
-- some pipeline-step entries may be `tracked-only` if Atlas does not return a resolvable manifest URN
-- dataset/model lineage entries have manifest IDs; pipeline-step entries may be tracked without an exportable manifest ID
-- `/pipeline/status` marks all stages done
-- `/registry` contains the pipeline-scoped raw, tokenized, and model artifact URIs
-- the three service `/provenance` endpoints all return manifest IDs for the same pipeline
-- `/model/info` returns the trained model metadata for that pipeline
+Export and verify a specific manifest:
 
-You can also export and verify a specific manifest:
+**macOS / Linux:**
+```bash
+MANIFEST_ID="urn:c2pa:..."   # from lineage output
 
+curl "http://localhost:8004/export/$MANIFEST_ID"
+curl "http://localhost:8004/verify/$MANIFEST_ID"
+```
+
+**Windows:**
 ```powershell
-$lineage = Invoke-RestMethod "http://localhost:8004/lineage?pipeline_id=demo-500"
+$lineage = Invoke-RestMethod "http://localhost:8004/lineage?pipeline_id=demo-200"
 $manifest = $lineage.chain[0].manifest_id
 $encoded = [uri]::EscapeDataString($manifest)
 
@@ -215,95 +226,153 @@ Invoke-RestMethod "http://localhost:8004/export/$encoded"
 Invoke-RestMethod "http://localhost:8004/verify/$encoded"
 ```
 
----
-
-## Step 4 — Run the Pipeline Scripts
-
-If you want the stages individually or through the PowerShell wrapper, use the provided scripts:
-
-```powershell
-scripts\run_pipeline.bat 500
-# or directly:
-pwsh scripts\pipeline.ps1 -Samples 500 -PipelineId default
-```
-
-Or run each stage individually:
-
-```powershell
-scripts\01_ingest.bat 500
-scripts\02_preprocess.bat
-scripts\03_train.bat
-```
-
-Training on CPU is the slowest stage. Wait for the final completed status before running inference or the `slow` tests.
+Expected success signals:
+- `/lineage` shows `chain_complete: true` after all stages
+- every lineage entry has a sidecar `tracking_id`
+- `/pipeline/status` marks all completed stages as done
+- `/registry` contains the raw, tokenized, and model artifact URIs
+- `/slsa` returns `{"count": N, "attestations": [...]}` with in-toto Statements
 
 ---
 
-## Step 5 — Run the Tests
+## Step 4 — Run the Tests
 
-```bat
-:: Fast health/schema checks only
+```bash
+# Smoke tests — fast health + schema checks, no pipeline run needed
+pytest tests/test_slsa.py -v -m smoke
+
+# All SLSA attestation tests (Stretch Goal 7)
+pytest tests/test_slsa.py -v
+
+# All non-slow tests
 pytest tests/ -v -m smoke
-
-:: All non-slow tests
 pytest tests/ -v
 
-:: Provenance chain tests after running the pipeline
-pytest tests/ -v -m wired --samples 200
-
-:: Full suite including fine-tuning and sentiment checks
-pytest tests/ -v -m slow --samples 500
+# Automated atlas-cli pipeline test (Stretch Goal 2)
+./scripts/test_atlas_pipeline.sh           # macOS / Linux
+bash scripts/test_atlas_pipeline.sh        # Windows (Git Bash)
 ```
 
 ### Test files
 
 | File | What it tests |
 |------|--------------|
-| `test_connection_handling.py` | transient disconnect retry, startup waits, timeout behavior |
+| `test_health.py` | All services reachable, /docs reachable |
+| `test_connection_handling.py` | Transient disconnect retry, startup waits, timeout behavior |
 | `test_data_ingestion.py` | Ingestion job lifecycle, SHA-256, S3 URI, idempotency |
 | `test_preprocessing.py` | Token counts, max_length, source linkage |
 | `test_fine_tuning.py` | Loss progression, model metadata, `/predict` schema |
 | `test_pipeline_e2e.py` | Full provenance chain, SHA-256 uniqueness, sentiment accuracy |
-| `test_atlas_sidecar.py` | Direct sidecar calls, manifest collect/export/verify, wired pipeline checks |
-| `test_demo_cancellation.py` | demo interrupt behavior and remote cancellation requests |
+| `test_atlas_sidecar.py` | Direct sidecar calls, manifest collect/export/verify |
+| `test_provenance_chain.py` | /lineage and /pipeline/status schema + wired chain correctness |
+| `test_slsa.py` | SLSA v0.2 attestation structure, /slsa endpoint, in-toto Statement format |
+| `test_demo_cancellation.py` | Demo interrupt behavior and remote cancellation requests |
 
-### Sidecar test modes
+---
 
-The sidecar tests have two modes controlled by markers:
+## Step 5 — Stop and Switch Backends
 
-```powershell
-# Direct — calls the sidecar manually, works regardless of ATLAS_SIDECAR_URL wiring
-pytest tests/test_atlas_sidecar.py -v
+**Stop Docker Compose:**
+```bash
+docker compose down
 
-# Wired — verifies the pipeline services auto-called the sidecar
-# Run the pipeline first, then:
-pytest tests/test_atlas_sidecar.py -v -m wired --samples 200
+# Also remove local volumes (clears MinIO data):
+docker compose down -v
 ```
 
-If wired tests fail with "not in registry", restart the containers with `docker compose up -d --force-recreate`, then re-run the pipeline before re-running the test.
+**Stop Kubernetes port-forwards:**
 
-### Notes
+macOS / Linux:
+```bash
+pkill -f "kubectl port-forward"
+```
 
-- Sentiment accuracy tests (`test_inference_label_correct`, etc.) **auto-skip** when `--samples < 500`. This is expected — BERT needs at least 500 samples and 3 epochs to classify both classes reliably.
-- `--samples 100` runs everything except sentiment tests, in about 1–2 minutes total.
-- `split=validation` is not available unless you ingest that split first. The default demo and scripts use `train`.
-- All job-based services now expose `POST /jobs/{id}/cancel`. Tests and the demo treat `cancelled` as a terminal job state.
+Windows:
+```bat
+scripts\stop_k8s_port_forward.bat
+```
+
+**Tear down the Kubernetes stack:**
+```bash
+kubectl delete namespace ml-pipeline
+```
+
+**Switch Docker Compose → Kubernetes:**
+
+macOS / Linux:
+```bash
+docker compose down
+kubectl apply -k k8s/
+# wait for rollouts, then start port-forwards
+```
+
+Windows:
+```powershell
+docker compose down
+scripts\setup_k8s_docker_desktop.bat
+```
+
+**Switch Kubernetes → Docker Compose:**
+
+macOS / Linux:
+```bash
+pkill -f "kubectl port-forward"
+kubectl delete namespace ml-pipeline
+docker compose up
+```
+
+Windows:
+```powershell
+scripts\stop_k8s_port_forward.bat
+kubectl delete -k k8s
+docker compose --progress plain up --build
+```
+
+> **Port conflict:** Docker Desktop binds Kubernetes `containerPort` values to `localhost` even for ClusterIP services. You must fully delete the namespace before `docker compose up` will work. If port 9000 is still allocated after namespace deletion, find the process holding it:
+> - macOS: `lsof -i :9000`
+> - Windows: `netstat -ano | findstr :9000`
+>
+> Stale `kind` or other project containers are a common cause — stop them with `docker stop <container-name>`.
 
 ---
 
 ## Recreate from Scratch
 
-```bat
-:: Tear down all containers and data
+```bash
+# Tear down all containers and data
 docker compose down -v
 
-:: Rebuild and restart
-docker compose --progress plain up --build
+# Rebuild and restart
+docker compose up --build
 
-:: Re-run pipeline and tests (new terminal)
+# Re-run demo (new terminal)
 python demo.py --samples 200 --pipeline-id recreate-demo
-scripts\run_pipeline.bat 500
-pytest tests/ -v -m slow --samples 500
+
+# Run tests
+pytest tests/test_slsa.py -v -m smoke
+./scripts/test_atlas_pipeline.sh
+```
+
+---
+
+## Kubernetes Debugging
+
+```bash
+# Watch pod status
+kubectl get pods -n ml-pipeline -w
+
+# Tail logs for a service
+kubectl logs -n ml-pipeline deployment/atlas-sidecar -f
+kubectl logs -n ml-pipeline deployment/fine-tuning -f
+
+# Describe a pod (events, image pull status, probe failures)
+kubectl describe pod -n ml-pipeline -l app=atlas-sidecar
+
+# Check PVCs are bound
+kubectl get pvc -n ml-pipeline
+
+# Check MinIO bucket was created
+kubectl logs job/minio-init -n ml-pipeline
 ```
 
 ---
@@ -312,9 +381,11 @@ pytest tests/ -v -m slow --samples 500
 
 | Problem | Fix |
 |---------|-----|
-| `docker: not found` | Open a new terminal after installing Docker Desktop |
-| Container stuck `unhealthy` | Check logs: `docker compose logs <service>` |
-| atlas-sidecar never becomes healthy | Rust build may have timed out — retry `docker compose up --build` |
-| All predictions return `negative` | Re-run `01_ingest.bat` (shuffle fix already applied), then preprocess and train again |
-| Sentiment tests skip at `--samples 500` | Confirm you passed `--samples 500` and training completed with `status: completed` |
-| `Ctrl+C` stopped the demo but work kept running earlier | Rebuild the stack; current images propagate local demo cancellation to the running service job |
+| `docker compose up` fails with port already allocated | Find the process: `lsof -i :9000` (macOS) or `netstat -ano \| findstr :9000` (Windows). Stop stale containers with `docker stop <name>`, or run `kubectl delete namespace ml-pipeline` if Kubernetes is the cause |
+| Container stuck `unhealthy` | `docker compose logs <service>` |
+| `atlas-sidecar` never becomes healthy | Rust build may have timed out — retry `docker compose up --build` |
+| Kubernetes pod restarts during fine-tuning | Liveness probe times out during BERT model loading on CPU — expected on first job submission; pod recovers and resubmitting succeeds |
+| `pytest-timeout` warnings | `pip install pytest-timeout` |
+| All predictions return `negative` | Re-run ingestion, then preprocess and train again |
+| `split=validation` not found | Ingest the validation split first: `python demo.py --stage ingest --split validation` |
+| `wired` tests fail with "not in registry" | Restart containers with `docker compose up -d --force-recreate`, re-run the pipeline, then re-run tests |

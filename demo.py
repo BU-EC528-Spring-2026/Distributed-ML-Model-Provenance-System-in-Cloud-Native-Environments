@@ -114,6 +114,10 @@ def _request_json(method: str, url: str, payload: dict | None = None, timeout: i
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
         raise RuntimeError(f"Cannot reach {url}: {reason}") from exc
+    except OSError as exc:
+        # Covers ConnectionResetError, BrokenPipeError, etc. that urllib does
+        # not always wrap in URLError (e.g. server RST mid-handshake on macOS).
+        raise RuntimeError(f"Connection error reaching {url}: {exc}") from exc
 
     if not raw:
         return {}
