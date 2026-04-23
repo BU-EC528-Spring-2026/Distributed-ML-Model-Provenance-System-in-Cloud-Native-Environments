@@ -3,7 +3,7 @@
 **BU EC528 Spring 2026**
 Mentors: Marcela Melara, Marcin Spoczynski (Intel Labs)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 Extending [Atlas CLI](https://github.com/IntelLabs/atlas-cli) into a cloud-native distributed provenance system.
 
