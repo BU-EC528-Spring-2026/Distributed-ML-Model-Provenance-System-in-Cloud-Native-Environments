@@ -18,6 +18,12 @@ Demo 3 presentation: https://docs.google.com/presentation/d/1WfeDlM877Tw3Msrw_t-
 Demo 3 video: https://drive.google.com/file/d/1BLxXcpIp_xUrE9GHFw9CGTNGA9couwYI/view?usp=sharing
 
 ---
+## Final Presentation
+Slides: https://docs.google.com/presentation/d/1O9D4g4Zt7UJEP9EzIyZKgcTbSV5nw0h0g138V8SgS-k/edit?slide=id.g3966e706cf1_0_0#slide=id.g3966e706cf1_0_0
+
+Video presentation: https://drive.google.com/file/d/1TyvwNBzbEEqTooh9x9XlKcMvtueIAA2V/view?usp=drive_link
+
+---
 
 ## Overview
 
